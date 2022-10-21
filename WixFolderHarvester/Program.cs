@@ -32,6 +32,12 @@ namespace WixXmlGenerator
 
         private const int HashLength = 16;
 
+        private static List<string> ExcludeExtensions = new List<string>();
+        private static List<string> ExcludeFiles = new List<string>();
+        private static List<string> ExcludePaths = new List<string>();
+
+        private static List<string> ComponentIds = new List<string>();
+
         public static void Main(string[] args)
         {
             try
@@ -49,19 +55,40 @@ namespace WixXmlGenerator
                 var componentGroupName = arguments.GetOrDefault("-componentgroup", "HeatGenerated");
                 var rootFolderRefId = arguments.GetOrDefault("-directoryrefid", "INSTALLFOLDER");
                 var outputFilePath = arguments["-output"];
-                var excludeFileExtensions = new HashSet<string>(
-                    arguments
-                        .GetOrDefault("-excludeextensions", "")
-                        .Split(new[]  { ';' }, StringSplitOptions.RemoveEmptyEntries));
+
+                var wixIgnore = arguments.GetOrDefault("-wixignore", null);
+                if (!string.IsNullOrEmpty(wixIgnore))
+                {
+                    foreach (var line in File.ReadAllLines(wixIgnore))
+                    {
+                        var trimmedLine = line.Trim();
+                        if (line.StartsWith("#") || string.IsNullOrEmpty(trimmedLine))
+                        {
+                            continue;
+                        }
+                        if (line.StartsWith("*"))
+                        {
+                            ExcludeExtensions.Add(trimmedLine.Substring(1));
+                        }
+                        if (line.StartsWith("/") || line.StartsWith("\\"))
+                        {
+                            ExcludePaths.Add(referencePath + trimmedLine.Replace("/", "\\"));
+                        }
+                        else
+                        {
+                            ExcludeFiles.Add(trimmedLine);
+                        }
+                    }
+                }
 
                 var builder = new StringBuilder();
 
                 builder.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
                 builder.AppendLine("<Wix xmlns=\"http://schemas.microsoft.com/wix/2006/wi\">");
 
-                var components = ProcessFilesFragment(rootFolderPath, referencePath, rootFolderRefId, excludeFileExtensions, builder);
+                ProcessFilesFragment(rootFolderPath, referencePath, rootFolderRefId, builder);
 
-                ProcessComponentsFragment(componentGroupName, components, builder);
+                ProcessComponentsFragment(componentGroupName, builder);
 
                 builder.AppendLine("</Wix>");
 
@@ -76,25 +103,22 @@ namespace WixXmlGenerator
             }
         }
 
-        private static List<string> ProcessFilesFragment(string rootFolderPath, string referencePath, string rootFolderRefId, HashSet<string> excludeExtensions, StringBuilder builder)
+        private static void ProcessFilesFragment(string rootFolderPath, string referencePath, string rootFolderRefId, StringBuilder builder)
         {
             builder.AppendLine("<Fragment>");
 
-            var components = new List<string>();
-
-            ProcessRootFolder(rootFolderPath, referencePath, rootFolderRefId, excludeExtensions, components, builder);
+            ProcessRootFolder(rootFolderPath, referencePath, rootFolderRefId, builder);
 
             builder.AppendLine("</Fragment>");
-            return components;
         }
 
-        private static void ProcessComponentsFragment(string componentGroupName, List<string> components, StringBuilder builder)
+        private static void ProcessComponentsFragment(string componentGroupName, StringBuilder builder)
         {
             builder.AppendLine("<Fragment>");
 
             builder.AppendLine($"<ComponentGroup Id=\"{componentGroupName}\">");
 
-            foreach (var component in components)
+            foreach (var component in ComponentIds)
             {
                 builder.AppendLine($"<ComponentRef Id=\"{component}\" />");
             }
@@ -103,21 +127,21 @@ namespace WixXmlGenerator
             builder.AppendLine("</Fragment>");
         }
 
-        private static void ProcessRootFolder(string rootFolderPath, string referencePath, string rootFolderRefId, HashSet<string> excludeExtensions, List<string> components, StringBuilder stringBuilder)
+        private static void ProcessRootFolder(string rootFolderPath, string referencePath, string rootFolderRefId, StringBuilder stringBuilder)
         {
             var folderName = Path.GetFileName(rootFolderPath);
             var folderId = GenerateIdentifier(DirectoryPrefix, referencePath);
 
             stringBuilder.AppendLine($"<DirectoryRef Id=\"{rootFolderRefId}\">");
 
-            ProcessFiles(rootFolderPath, referencePath, "", folderId, excludeExtensions, components, stringBuilder);
+            ProcessFiles(rootFolderPath, referencePath, folderId, stringBuilder);
 
-            ProcessChildFolders(rootFolderPath, referencePath, excludeExtensions, components, stringBuilder);
+            ProcessChildFolders(rootFolderPath, referencePath, stringBuilder);
 
             stringBuilder.AppendLine($"</DirectoryRef>");
         }
 
-        private static void ProcessChildFolders(string folderPath, string referencePath, HashSet<string> excludeExtensions, List<string> components, StringBuilder stringBuilder)
+        private static void ProcessChildFolders(string folderPath, string referencePath, StringBuilder stringBuilder)
         {
             var folders = Directory.GetDirectories(folderPath, "*", SearchOption.TopDirectoryOnly);
 
@@ -125,33 +149,40 @@ namespace WixXmlGenerator
             {
                 var childFolderName = Path.GetFileName(childFolder);
                 var childReferencePath = Path.Combine(referencePath, childFolderName);
-                ProcessFolder(childFolder, childReferencePath, excludeExtensions, components, stringBuilder);
+                if (ExcludePaths.Contains(childReferencePath))
+                {
+                    continue;
+                }
+                ProcessFolder(childFolder, childReferencePath, stringBuilder);
             }
         }
 
-        private static void ProcessFolder(string folderPath, string referencePath, HashSet<string> excludeExtensions, List<string> components, StringBuilder stringBuilder)
+        private static void ProcessFolder(string folderPath, string referencePath, StringBuilder stringBuilder)
         {
             var folderName = Path.GetFileName(folderPath);
             var folderId = GenerateIdentifier(DirectoryPrefix, referencePath);
 
             stringBuilder.AppendLine($"<Directory Id=\"{folderId}\" Name=\"{folderName}\">");
 
-            ProcessFiles(folderPath, referencePath, folderName, folderId, excludeExtensions, components, stringBuilder);
+            ProcessFiles(folderPath, referencePath, folderId, stringBuilder);
 
-            ProcessChildFolders(folderPath, referencePath, excludeExtensions, components, stringBuilder);
+            ProcessChildFolders(folderPath, referencePath, stringBuilder);
 
             stringBuilder.AppendLine($"</Directory>");
         }
 
-        private static void ProcessFiles(string folderPath, string referencePath, string folderName, string folderId, HashSet<string> excludeExtensions, List<string> components, StringBuilder stringBuilder)
+        private static void ProcessFiles(string folderPath, string referencePath, string folderId, StringBuilder stringBuilder)
         {
             var files = Directory.GetFiles(folderPath, "*", SearchOption.TopDirectoryOnly);
 
             foreach (var file in files)
             {
                 var fileName = Path.GetFileName(file);
-                var extension = Path.GetExtension(file);
-                if (excludeExtensions.Contains(extension))
+                if (ExcludeExtensions.Any(x => fileName.EndsWith(x)))
+                {
+                    continue;
+                }
+                if (ExcludeFiles.Contains(fileName))
                 {
                     continue;
                 }
@@ -159,11 +190,9 @@ namespace WixXmlGenerator
                 var componentId = GenerateIdentifier(ComponentPrefix, folderId, fileId);
                 var filePath = Path.Combine(referencePath, fileName);
 
-                components.Add(componentId);
+                ComponentIds.Add(componentId);
 
-                stringBuilder.AppendLine($"<Component Id=\"{componentId}\" Guid=\"*\">");
-                stringBuilder.AppendLine($"<File Id=\"{fileId}\" KeyPath=\"yes\" Source=\"{filePath}\" />");
-                stringBuilder.AppendLine($"</Component>");
+                stringBuilder.AppendLine($"<Component><File Id=\"{componentId}\" KeyPath=\"yes\" Source=\"{filePath}\" /></Component>");
             }
         }
 
