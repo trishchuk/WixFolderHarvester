@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml;
+using WixFolderHarvester.Helpers;
 
 namespace WixXmlGenerator
 {
@@ -32,9 +33,7 @@ namespace WixXmlGenerator
 
         private const int HashLength = 16;
 
-        private static List<string> ExcludeExtensions = new List<string>();
-        private static List<string> ExcludeFiles = new List<string>();
-        private static List<string> ExcludePaths = new List<string>();
+        private static Ignore.Ignore Ignore = new Ignore.Ignore();
 
         private static List<string> ComponentIds = new List<string>();
 
@@ -59,26 +58,8 @@ namespace WixXmlGenerator
                 var wixIgnore = arguments.GetOrDefault("-wixignore", null);
                 if (!string.IsNullOrEmpty(wixIgnore))
                 {
-                    foreach (var line in File.ReadAllLines(wixIgnore))
-                    {
-                        var trimmedLine = line.Trim();
-                        if (line.StartsWith("#") || string.IsNullOrEmpty(trimmedLine))
-                        {
-                            continue;
-                        }
-                        if (line.StartsWith("*"))
-                        {
-                            ExcludeExtensions.Add(trimmedLine.Substring(1));
-                        }
-                        if (line.StartsWith("/") || line.StartsWith("\\"))
-                        {
-                            ExcludePaths.Add(referencePath + trimmedLine.Replace("/", "\\"));
-                        }
-                        else
-                        {
-                            ExcludeFiles.Add(trimmedLine);
-                        }
-                    }
+                    var ignorePatterns = WixIgnoreHelper.ReadIgnorePatterns(wixIgnore);
+                    Ignore.Add(ignorePatterns);
                 }
 
                 var builder = new StringBuilder();
@@ -134,14 +115,14 @@ namespace WixXmlGenerator
 
             stringBuilder.AppendLine($"<DirectoryRef Id=\"{rootFolderRefId}\">");
 
-            ProcessFiles(rootFolderPath, referencePath, folderId, stringBuilder);
+            ProcessFiles(rootFolderPath, rootFolderPath, referencePath, folderId, stringBuilder);
 
-            ProcessChildFolders(rootFolderPath, referencePath, stringBuilder);
+            ProcessChildFolders(rootFolderPath, rootFolderPath, referencePath, stringBuilder);
 
             stringBuilder.AppendLine($"</DirectoryRef>");
         }
 
-        private static void ProcessChildFolders(string folderPath, string referencePath, StringBuilder stringBuilder)
+        private static void ProcessChildFolders(string rootFolderPath, string folderPath, string referencePath, StringBuilder stringBuilder)
         {
             var folders = Directory.GetDirectories(folderPath, "*", SearchOption.TopDirectoryOnly);
 
@@ -149,43 +130,44 @@ namespace WixXmlGenerator
             {
                 var childFolderName = Path.GetFileName(childFolder);
                 var childReferencePath = Path.Combine(referencePath, childFolderName);
-                if (ExcludePaths.Contains(childReferencePath))
+                var relativePath = PathHelper.GetRelativePath(childFolder, rootFolderPath);
+                if (Ignore.IsIgnored(PathHelper.ConvertToUnixPath(relativePath)))
                 {
                     continue;
                 }
-                ProcessFolder(childFolder, childReferencePath, stringBuilder);
+
+                ProcessFolder(rootFolderPath, childFolder, childReferencePath, stringBuilder);
             }
         }
 
-        private static void ProcessFolder(string folderPath, string referencePath, StringBuilder stringBuilder)
+        private static void ProcessFolder(string rootFolderPath, string folderPath, string referencePath, StringBuilder stringBuilder)
         {
             var folderName = Path.GetFileName(folderPath);
             var folderId = GenerateIdentifier(DirectoryPrefix, referencePath);
 
             stringBuilder.AppendLine($"<Directory Id=\"{folderId}\" Name=\"{folderName}\">");
 
-            ProcessFiles(folderPath, referencePath, folderId, stringBuilder);
+            ProcessFiles(rootFolderPath, folderPath, referencePath, folderId, stringBuilder);
 
-            ProcessChildFolders(folderPath, referencePath, stringBuilder);
+            ProcessChildFolders(rootFolderPath, folderPath, referencePath, stringBuilder);
 
             stringBuilder.AppendLine($"</Directory>");
         }
 
-        private static void ProcessFiles(string folderPath, string referencePath, string folderId, StringBuilder stringBuilder)
+        private static void ProcessFiles(string rootFolderPath, string folderPath, string referencePath, string folderId, StringBuilder stringBuilder)
         {
             var files = Directory.GetFiles(folderPath, "*", SearchOption.TopDirectoryOnly);
 
             foreach (var file in files)
             {
                 var fileName = Path.GetFileName(file);
-                if (ExcludeExtensions.Any(x => fileName.EndsWith(x)))
+
+                var relativeFile = PathHelper.GetRelativePath(file, rootFolderPath);
+                if (Ignore.IsIgnored(PathHelper.ConvertToUnixPath(relativeFile)))
                 {
                     continue;
                 }
-                if (ExcludeFiles.Contains(fileName))
-                {
-                    continue;
-                }
+                
                 var fileId = GenerateIdentifier(FilePrefix, folderId, fileName);
                 var componentId = GenerateIdentifier(ComponentPrefix, folderId, fileId);
                 var filePath = Path.Combine(referencePath, fileName);
